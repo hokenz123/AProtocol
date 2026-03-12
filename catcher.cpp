@@ -2,140 +2,114 @@
 #include <queue>
 #include <mutex>
 #include <cstring>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #include <linux/netfilter.h>
-#include <libnetfilter_queue/libnetfilter_queue.h>     
+#include <libnetfilter_queue/libnetfilter_queue.h>
 
-std::queue<std::vector<uint8_t>> packet_queue; 
-std::mutex queue_mutex; 
+std::queue<std::vector<uint8_t>> packet_queue;
+std::mutex queue_mutex;
 
-void packet_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet);
-void addPacketToQueue(const uint8_t* data, int size);
+void savePacket(const uint8_t* data, int size) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    packet_queue.push(std::vector<uint8_t>(data, data + size));
+    std::cout << " [+] Пинг перехвачен! В очереди: " << packet_queue.size() << "\n";
+}
+
+int packetCallback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
+                   struct nfq_data *nfa, void *data) {
+    
+    uint8_t *pkt_data;
+    int len = nfq_get_payload(nfa, &pkt_data);
+    
+    if (len > 0) {
+        struct iphdr *ip = (struct iphdr*)pkt_data;
+        
+        if (ip->protocol == 1) {
+            int ip_len = ip->ihl * 4;
+            struct icmphdr *icmp = (struct icmphdr*)(pkt_data + ip_len);
+            
+            if (icmp->type == 8) {
+                savePacket(pkt_data, len);
+                
+                uint32_t packet_id = 0;
+                struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
+                if (ph) {
+                    packet_id = ntohl(ph->packet_id);
+                }
+                
+                return nfq_set_verdict(qh, packet_id, NF_DROP, 0, NULL);
+            }
+        }
+    }
+    
+    return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, NULL);
+}
 
 int main() {
-    std::cout << "=== ПЕРЕХВАТЧИК PING ПАКЕТОВ ===" << std::endl;
-    std::cout << "Все ping запросы будут перехвачены и заблокированы!" << std::endl;
-    std::cout << "Пакеты складываются в очередь для обработки" << std::endl;
-    std::cout << "Нажмите:\n";
-    std::cout << "  'g' - получить все пакеты из очереди\n";
-    std::cout << "  'q' - выход\n\n";
+    std::cout << "\n=== БЛОКИРОВЩИК ПИНГОВ ===\n";
+    std::cout << "Команды: g - показать пакеты, q - выход\n\n";
     
-    // Шаг 1: Открываем соединение с netfilter
-    struct nfq_handle *netfilter_handle = nfq_open();
-    if (!netfilter_handle) {
-        std::cerr << "ОШИБКА: Не удалось открыть netfilter" << std::endl;
+    struct nfq_handle *h = nfq_open();
+    if (!h) {
+        std::cerr << "Ошибка nfq_open\n";
         return 1;
     }
     
-    // Шаг 2: Отключаем предыдущие обработчики и подключаемся к IPv4
-    nfq_unbind_pf(netfilter_handle, AF_INET);
-    if (nfq_bind_pf(netfilter_handle, AF_INET) < 0) {
-        std::cerr << "ОШИБКА: Не удалось привязаться к IPv4" << std::endl;
+    nfq_unbind_pf(h, AF_INET);
+    if (nfq_bind_pf(h, AF_INET) < 0) {
+        std::cerr << "Ошибка bind\n";
+        nfq_close(h);
         return 1;
     }
     
-    // Шаг 3: Создаём очередь для пакетов (номер 0)
-    struct nfq_q_handle *queue_handle = nfq_create_queue(netfilter_handle, 0, &packetCallback, nullptr);
-    if (!queue_handle) {
-        std::cerr << "ОШИБКА: Не удалось создать очередь" << std::endl;
+    struct nfq_q_handle *qh = nfq_create_queue(h, 0, &packetCallback, NULL);
+    if (!qh) {
+        std::cerr << "Ошибка создания очереди\n";
+        nfq_close(h);
         return 1;
     }
     
-    // Шаг 4: Настраиваем режим захвата (копируем весь пакет)
-    if (nfq_set_mode(queue_handle, NFQNL_COPY_PACKET, 0xFFFF) < 0) {
-        std::cerr << "ОШИБКА: Не удалось установить режим захвата" << std::endl;
-        return 1;
-    }
+    nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xFFFF);
+    int fd = nfq_fd(h);
     
-    // Шаг 5: Получаем файловый дескриптор для чтения пакетов
-    int file_descriptor = nfq_fd(netfilter_handle);
+    std::cout << "ГОТОВО! Пинги блокируются.\n\n";
     
-    std::cout << "ГОТОВО! Теперь все ping запросы будут перехватываться." << std::endl;
-    std::cout << "Попробуйте пинговать - пинг НЕ будет работать!\n" << std::endl;
-    
-    // Шаг 6: Основной цикл обработки
-    char buffer[4096];
-    fd_set read_fds;
+    char buf[4096];
+    fd_set fds;
     
     while (true) {
-        FD_ZERO(&read_fds);
-        FD_SET(file_descriptor, &read_fds);  
-        FD_SET(0, &read_fds);                 
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        FD_SET(0, &fds);
         
-        select(file_descriptor + 1, &read_fds, nullptr, nullptr, nullptr);
-
-        if (FD_ISSET(0, &read_fds)) {
-            char command;
-            read(0, &command, 1);
+        select(fd + 1, &fds, NULL, NULL, NULL);
+        
+        if (FD_ISSET(0, &fds)) {
+            char cmd;
+            read(0, &cmd, 1);
             
-            if (command == 'g') {
-                
-                std::cout << "\n--- ПОЛУЧАЕМ ПАКЕТЫ ИЗ ОЧЕРЕДИ ---" << std::endl;
-                auto packets = getAllPackets();
-                
-                
-                std::cout << "Получено " << packets.size() << " пакетов" << std::endl;
-                
-                
-                for (size_t i = 0; i < packets.size() && i < 3; i++) {
-                    std::cout << "  Пакет " << i+1 << ": " << packets[i].size() << " байт" << std::endl;
+            if (cmd == 'q') break;
+            if (cmd == 'g') {
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                std::cout << "\nПакетов в очереди: " << packet_queue.size() << "\n";
+                while (!packet_queue.empty()) {
+                    std::cout << "  Пакет размером " << packet_queue.front().size() << " байт\n";
+                    packet_queue.pop();
                 }
-                std::cout << std::endl;
-            }
-            else if (command == 'q') {
-                std::cout << "Выход..." << std::endl;
-                break;
+                std::cout << "\n";
             }
         }
         
-        if (FD_ISSET(file_descriptor, &read_fds)) {
-            int bytes_read = recv(file_descriptor, buffer, sizeof(buffer), 0);
-            if (bytes_read > 0) {
-                nfq_handle_packet(netfilter_handle, buffer, bytes_read);
-            }
+        if (FD_ISSET(fd, &fds)) {
+            int rv = recv(fd, buf, sizeof(buf), 0);
+            if (rv > 0) nfq_handle_packet(h, buf, rv);
         }
     }
     
-    nfq_destroy_queue(queue_handle);
-    nfq_close(netfilter_handle);
-    
+    nfq_destroy_queue(qh);
+    nfq_close(h);
     return 0;
-}
-
-void packet_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet){
-    std::cout << "Получен пакет! Размер: " << pkthdr->len << " байт" << std::endl;
-
-    // Всегда отрезаем 16 байт (для "any" интерфейса)
-    const u_char *ip_packet = packet + 16;
-    int ip_len = pkthdr->caplen - 16;
-    
-    std::cout << "IP пакет: " << ip_len << " байт" << std::endl;
-    std::cout << "Первые байты: ";
-    for (int i = 0; i < 20 && i < ip_len; i++) {
-        printf("%02x ", ip_packet[i]);
-    }
-    std::cout << std::endl;
-}
-
-void addPacketToQueue(const uint8_t* data, int size) {
-    std::lock_guard<std::mutex> lock(queue_mutex);  
-    std::vector<uint8_t> packet(data, data + size); 
-    packet_queue.push(packet);                      
-    std::cout << " [+] Пинг перехвачен! Пакетов в очереди: " << packet_queue.size() << std::endl;
-}
-
-std::vector<std::vector<uint8_t>> getAllPackets() {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    
-    std::vector<std::vector<uint8_t>> result;
-    
-    while (!packet_queue.empty()) {
-        result.push_back(packet_queue.front());
-        packet_queue.pop();
-    }
-    
-    std::cout << " [*] Взято пакетов из очереди: " << result.size() << std::endl;
-    return result;
 }
