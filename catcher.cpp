@@ -1,10 +1,16 @@
 #include <iostream>
-#include <pcap.h>
-#include <netinet/ip.h>      
-#include <netinet/ip_icmp.h> 
-#include <arpa/inet.h>       
+#include <queue>
+#include <cstring>
+#include <arpa/inet.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
+#include <linux/netfilter.h>
+#include <libnetfilter_queue/libnetfilter_queue.h>     
+
+std::queue<std::vector<uint8_t>> packet_queue; 
 
 void packet_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet);
+void addPacketToQueue(const uint8_t* data, int size);
 
 int main() {
 
@@ -55,4 +61,11 @@ void packet_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u
         printf("%02x ", ip_packet[i]);
     }
     std::cout << std::endl;
+}
+
+void addPacketToQueue(const uint8_t* data, int size) {
+    std::lock_guard<std::mutex> lock(queue_mutex);  // блокируем доступ для других потоков
+    std::vector<uint8_t> packet(data, data + size); // копируем данные пакета
+    packet_queue.push(packet);                       // кладём в очередь
+    std::cout << " [+] Пинг перехвачен! Пакетов в очереди: " << packet_queue.size() << std::endl;
 }
