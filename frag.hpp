@@ -19,8 +19,7 @@ namespace AProtocol{
     private:
         unsigned int block_count     : 8;
         int is_last                  : 1;
-        int next_packet_offset       : 9;
-        int padding                  : 6;
+        int padding                  : 23;
 
         std::array<char, BodySize> body;
     public:
