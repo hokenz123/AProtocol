@@ -2,6 +2,7 @@
 #include <queue>
 #include <mutex>
 #include <cstring>
+#include <cstdlib>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/ip.h>
@@ -12,43 +13,14 @@
 std::queue<std::vector<uint8_t>> packet_queue;
 std::mutex queue_mutex;
 
-void savePacket(const uint8_t* data, int size) {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    packet_queue.push(std::vector<uint8_t>(data, data + size));
-    std::cout << " [+] Пинг перехвачен! В очереди: " << packet_queue.size() << "\n";
-}
+void remove_iptables_rules();
+void add_iptables_rules();
+void savePacket(const uint8_t* data, int size);
+int packetCallback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,struct nfq_data *nfa, void *data);
 
-int packetCallback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
-                   struct nfq_data *nfa, void *data) {
-    
-    uint8_t *pkt_data;
-    int len = nfq_get_payload(nfa, &pkt_data);
-    
-    if (len > 0) {
-        struct iphdr *ip = (struct iphdr*)pkt_data;
-        
-        if (ip->protocol == 1) {
-            int ip_len = ip->ihl * 4;
-            struct icmphdr *icmp = (struct icmphdr*)(pkt_data + ip_len);
-            
-            if (icmp->type == 8) {
-                savePacket(pkt_data, len);
-                
-                uint32_t packet_id = 0;
-                struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
-                if (ph) {
-                    packet_id = ntohl(ph->packet_id);
-                }
-                
-                return nfq_set_verdict(qh, packet_id, NF_DROP, 0, NULL);
-            }
-        }
-    }
-    
-    return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, NULL);
-}
 
 int main() {
+    add_iptables_rules();
     std::cout << "\n=== БЛОКИРОВЩИК ПИНГОВ ===\n";
     std::cout << "Команды: g - показать пакеты, q - выход\n\n";
     
@@ -111,5 +83,57 @@ int main() {
     
     nfq_destroy_queue(qh);
     nfq_close(h);
+    remove_iptables_rules();
     return 0;
+}
+
+void savePacket(const uint8_t* data, int size) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    packet_queue.push(std::vector<uint8_t>(data, data + size));
+    std::cout << " [+] Пинг перехвачен! В очереди: " << packet_queue.size() << "\n";
+}
+
+int packetCallback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
+                   struct nfq_data *nfa, void *data) {
+    
+    uint8_t *pkt_data;
+    int len = nfq_get_payload(nfa, &pkt_data);
+    
+    if (len > 0) {
+        struct iphdr *ip = (struct iphdr*)pkt_data;
+        
+        if (ip->protocol == 1) {
+            int ip_len = ip->ihl * 4;
+            struct icmphdr *icmp = (struct icmphdr*)(pkt_data + ip_len);
+            
+            if (icmp->type == 8) {
+                savePacket(pkt_data, len);
+                
+                uint32_t packet_id = 0;
+                struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
+                if (ph) {
+                    packet_id = ntohl(ph->packet_id);
+                }
+                
+                return nfq_set_verdict(qh, packet_id, NF_DROP, 0, NULL);
+            }
+        }
+    }
+    
+    return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, NULL);
+}
+
+
+// Добавить правила iptables
+void add_iptables_rules() {
+    system("iptables -I INPUT -p icmp -j NFQUEUE --queue-num 0 2>/dev/null");
+    system("iptables -I OUTPUT -p icmp -j NFQUEUE --queue-num 0 2>/dev/null");
+    std::cout << " [+] Правила iptables добавлены\n";
+}
+
+// Удалить правила iptables
+void remove_iptables_rules() {
+    system("iptables -D INPUT -p icmp -j NFQUEUE --queue-num 0 2>/dev/null");
+    system("iptables -D OUTPUT -p icmp -j NFQUEUE --queue-num 0 2>/dev/null");
+    std::cout << " [-] Правила iptables удалены\n";
 }
