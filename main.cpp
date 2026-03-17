@@ -3,10 +3,8 @@
 #include <iostream>
 #include <array>
 #include <fstream>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <cstring>
+#include "oursockets.h"
 
 template <class T>
 void print_vector (const std::vector<T>& vec) {
@@ -19,6 +17,7 @@ const int Port = 8888;
 const char* SendAddr = "127.0.0.1";
 
 int main() {
+    MAIN_STARTUP();
     const char* filename = "equippable-items.json";
     std::ifstream f(filename, std::ios::binary | std::ios::ate);
     f.seekg(0, std::ios::beg);
@@ -43,13 +42,15 @@ int main() {
 
     socklen_t len = sizeof(servaddr);
 
-    const char* msg = "Hello!";
-    sendto(sockfd, msg, sizeof(msg), MSG_CONFIRM, 
-            (const struct sockaddr*)(&servaddr), len);
+    // const char* msg = "Hello!";
+    // sendto(sockfd, msg, sizeof(msg), 0, 
+    //         (const struct sockaddr*)(&servaddr), len);
 
     AProtocol::fragment(f, [=](AProtocol::Block b){
-        sendto(sockfd, reinterpret_cast<char*>(&b), AProtocol::BlockSize, MSG_CONFIRM, 
+        sendto(sockfd, reinterpret_cast<char*>(&b), AProtocol::BlockSize, 0, 
                (const struct sockaddr*)(&servaddr), len);
+        if (b.isLast())
+            std::cout << "Sent last block" << std::endl;
     });
 
     close(sockfd);
@@ -65,5 +66,6 @@ int main() {
         bq.pop();
     }
     of.close();
+    MAIN_CLEANUP();
     return 0;
 }

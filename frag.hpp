@@ -81,6 +81,8 @@ namespace AProtocol{
                 is_last = true;
             }
             Block b(block_count, is_last, body);
+            if (b.isLast())
+                std::cout << "Block No. " << b.getCount() << " is last" << std::endl;
             // blockQueue.push(b);
             func(b);
             block_count++;
