@@ -1,12 +1,9 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <vector>
+#include "oursockets.h"
 #include <thread>
-#include <mutex>
 
 static const int PORT = 8888;
 static const int BlockSize = 1500;
@@ -33,9 +30,10 @@ void defragmentator_NT(Block block, std::ofstream &out);
 void defragmentator(std::vector<Block> &blocks, bool &IsEnabled);
 
 int main() {
+    MAIN_STARTUP();
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
-        std::cerr << "Ошибка создания сокета" << std::endl;
+        std::cerr << "Error creating socket" << std::endl;
         return 1;
     }
     
@@ -45,12 +43,12 @@ int main() {
     server_addr.sin_port = htons(PORT);
     
     if (bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cerr << "Ошибка привязки сокета к порту " << PORT << std::endl;
+        std::cerr << "Error binding socket to port" << PORT << std::endl;
         close(sockfd);
         return 1;
     }
     
-    std::cout << "заходим в прослушивание" << std::endl;
+    std::cout << "Entering listening" << std::endl;
     //listener(sockfd, lstEnabled);
 
     std::thread lstr(listener, sockfd, std::ref(lstEnabled));
@@ -64,25 +62,27 @@ int main() {
 
     defr.join();
     lstr.join();
-    std::cout << "выход из программы" << std::endl;
+
+    std::cout << "Exit out of program" << std::endl;
     
     close(sockfd);
+    MAIN_CLEANEUP();
     return 0;
 }
 
 void listener(int sockfd, bool &IsEnabled) {
-    std::cout << "зашли" << std::endl;
+
+    std::cout << "Entered" << std::endl;
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     char buffer[BlockSize];
 
     int packet_count = 0;
     
-    //std::ofstream out;
-    //out.open("output.txt");
 
     while (IsEnabled) {
-        std::cout << "включен и работает" << std::endl;
+
+        std::cout << "Enabled and working" << std::endl;
         int n = recvfrom(sockfd, buffer, BlockSize, 0,
                         (struct sockaddr*)&client_addr, &client_len);
         
@@ -90,19 +90,16 @@ void listener(int sockfd, bool &IsEnabled) {
         std::cout << "Пакет #" << packet_count << ", размер: " << n << " байт" << std::endl;
 
         if (n == BlockSize || n == 15 || true) {
-            std::cout << "чёто пришло" << std::endl;
+            std::cout << "Something recieved" << std::endl;
             Block block;
             memcpy(&block, buffer, BlockSize);
             {
                 std::lock_guard<std::mutex> lock(blocks_mutex);
                 blocks.push_back(block);
             }
-            std::cout << "Пришёл пакет размером " << n << " байт" << std::endl;
-            
-            //defragmentator(block, out);
+            std::cout << "Got packet of size " << n << " byte" << std::endl ;
         }
     }
-    //out.close();
     
 }
 
@@ -114,11 +111,13 @@ void defragmentator_NT(Block block, std::ofstream &out){
 
     if(out.is_open()){
         out << block.body;
-        std::cout << "Записано в файл: " << block.body << std::endl;
+        //std::cout << "Записано в файл: " << block.body << std::endl;
+        std::cout << "Wrote to file: " << block.body << std::endl;
         //out.close();
         //lstEnabled = false;
     } else {
-        std::cerr << "Ошибка открытия файла" << std::endl;
+        //std::cerr << "Ошибка открытия файла" << std::endl;
+        std::cerr << "Error opening file" << std::endl;
     }
 }
 
@@ -128,7 +127,7 @@ void defragmentator(std::vector<Block> &blocks, bool &IsEnabled){
     
     std::ofstream out;
     out.open("output.txt");
-    std::cout << "Файл успешно открыт" << std::endl;
+    std::cout << "File opened successfully" << std::endl;
     if(out.is_open()){
         while(IsEnabled){
             if (blocks.size() > 0){
@@ -137,13 +136,13 @@ void defragmentator(std::vector<Block> &blocks, bool &IsEnabled){
                     if (curBlock.block_count > packNumber){
                         packNumber = curBlock.block_count;
                         out << curBlock.body;
-                        std::cout << "запиано. " << std::endl;
+                        std::cout << "Wrote to file: " << curBlock.body << std::endl;
                     }
                 }
             }
         }
         out.close();
     } else {
-        std::cerr << "Ошибка открытия файла" << std::endl;
+        std::cerr << "Error opening file" << std::endl;
     }
 }
