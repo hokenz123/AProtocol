@@ -4,6 +4,7 @@
 #include <vector>
 #include "oursockets.h"
 #include <thread>
+#include <mutex>
 
 static const int PORT = 8888;
 static const int BlockSize = 1500;
