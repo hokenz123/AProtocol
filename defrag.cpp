@@ -105,18 +105,11 @@ void listener(int sockfd, bool &IsEnabled) {
 
 void defragmentator_NT(Block block, std::ofstream &out){
     // для непосредственной записи в файл
-    
-    //std::ofstream out;
-    //out.open("output.txt");
 
     if(out.is_open()){
         out << block.body;
-        //std::cout << "Записано в файл: " << block.body << std::endl;
         std::cout << "Wrote to file: " << block.body << std::endl;
-        //out.close();
-        //lstEnabled = false;
     } else {
-        //std::cerr << "Ошибка открытия файла" << std::endl;
         std::cerr << "Error opening file" << std::endl;
     }
 }
