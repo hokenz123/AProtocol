@@ -5,7 +5,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
-//#include <thread>
+#include <thread>
+#include <mutex>
 
 static const int PORT = 8888;
 static const int BlockSize = 1500;
@@ -14,6 +15,7 @@ static const int BodySize = BlockSize - HeaderSize;
 
 bool lstEnabled = true;
 bool dfgEnabled = true;
+std::mutex blocks_mutex;
 
 #pragma pack(push, 1)
 struct Block {
@@ -27,7 +29,7 @@ struct Block {
 std::vector<Block> blocks;
 
 void listener(int sockfd, bool &IsEnabled);
-void defragmentator(Block block);
+void defragmentator_NT(Block block, std::ofstream &out);
 void defragmentator(std::vector<Block> &blocks, bool &IsEnabled);
 
 int main() {
@@ -49,20 +51,20 @@ int main() {
     }
     
     std::cout << "заходим в прослушивание" << std::endl;
-    listener(sockfd, lstEnabled);
+    //listener(sockfd, lstEnabled);
 
+    std::thread lstr(listener, sockfd, std::ref(lstEnabled));
+    std::thread defr(defragmentator, std::ref(blocks), std::ref(dfgEnabled));
+
+    std::cout << "Нажмите Enter для остановки..." << std::endl;
+    std::cin.get();
+
+    lstEnabled = false;
+    dfgEnabled = false;
+
+    defr.join();
+    lstr.join();
     std::cout << "выход из программы" << std::endl;
-    // std::thread lstr(listener, {sockfd, lstEnabled});
-    // std::thread defr(defragmentator, {blocks, dfgEnabled});
-    //TODO: Потоки не работают
-    // char a;
-    // std::cin >> a;
-
-    // lstEnabled = false;
-    // dfgEnabled = false;
-
-    // defr.join();
-    // lstr.join();
     
     close(sockfd);
     return 0;
@@ -73,34 +75,48 @@ void listener(int sockfd, bool &IsEnabled) {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     char buffer[BlockSize];
+
+    int packet_count = 0;
     
+    //std::ofstream out;
+    //out.open("output.txt");
+
     while (IsEnabled) {
         std::cout << "включен и работает" << std::endl;
         int n = recvfrom(sockfd, buffer, BlockSize, 0,
                         (struct sockaddr*)&client_addr, &client_len);
         
-        if (n == BlockSize || n == 15) {
+        packet_count++;
+        std::cout << "Пакет #" << packet_count << ", размер: " << n << " байт" << std::endl;
+
+        if (n == BlockSize || n == 15 || true) {
             std::cout << "чёто пришло" << std::endl;
             Block block;
             memcpy(&block, buffer, BlockSize);
-            blocks.push_back(block);
+            {
+                std::lock_guard<std::mutex> lock(blocks_mutex);
+                blocks.push_back(block);
+            }
             std::cout << "Пришёл пакет размером " << n << " байт" << std::endl;
-            defragmentator(block);
+            
+            //defragmentator(block, out);
         }
     }
+    //out.close();
+    
 }
 
-void defragmentator(Block block){
+void defragmentator_NT(Block block, std::ofstream &out){
     // для непосредственной записи в файл
     
-    std::ofstream out;
-    out.open("output.txt");
+    //std::ofstream out;
+    //out.open("output.txt");
 
     if(out.is_open()){
         out << block.body;
         std::cout << "Записано в файл: " << block.body << std::endl;
-        out.close();
-        lstEnabled = false;
+        //out.close();
+        //lstEnabled = false;
     } else {
         std::cerr << "Ошибка открытия файла" << std::endl;
     }
@@ -121,6 +137,7 @@ void defragmentator(std::vector<Block> &blocks, bool &IsEnabled){
                     if (curBlock.block_count > packNumber){
                         packNumber = curBlock.block_count;
                         out << curBlock.body;
+                        std::cout << "запиано. " << std::endl;
                     }
                 }
             }
