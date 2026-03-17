@@ -24,7 +24,7 @@ struct Block {
 
 std::vector<Block> blocks;
 
-void listener(int sockfd, bool &IsEnabled);
+void listener(int sockfd);
 void defragmentator(Block block);
 void defragmentator(std::vector<Block> &blocks, bool &IsEnabled);
 
@@ -51,10 +51,7 @@ int main() {
     
     // std::cout << "заходим в прослушивание" << std::endl;
     std::cout << "Entering listening" << std::endl;
-    while (true) {
-        lstEnabled = true;
-        listener(sockfd, lstEnabled);
-    }
+    listener(sockfd);
 
     // std::cout << "выход из программы" << std::endl;
     std::cout << "Exit out of program" << std::endl;
@@ -71,27 +68,27 @@ int main() {
     // lstr.join();
     
     close(sockfd);
-    MAIN_CLEANEUP();
+    MAIN_CLEANUP();
     return 0;
 }
 
-void listener(int sockfd, bool &IsEnabled) {
+void listener(int sockfd) {
     // std::cout << "зашли" << std::endl;
     std::cout << "Entered" << std::endl;
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     char buffer[BlockSize];
     
-    while (IsEnabled) {
+    while (lstEnabled) {
         // std::cout << "включен и работает" << std::endl;
-        std::cout << "Enabled and working" << std::endl;
+        std::cout << "Enabled and working (" << blocks.size() << ')' << std::endl;
         int n = recvfrom(sockfd, buffer, BlockSize, 0,
                         (struct sockaddr*)&client_addr, &client_len);
         
         if (n == BlockSize) {
             //std::cout << "чёто пришло" << std::endl;
             std::cout << "Something recieved" << std::endl;
-                       Block block;
+            Block block;
             memcpy(&block, buffer, BlockSize);
             blocks.push_back(block);
             //std::cout << "Пришёл пакет размером " << n << " байт" << std::endl;
@@ -105,14 +102,15 @@ void defragmentator(Block block){
     // для непосредственной записи в файл
     
     std::ofstream out;
-    out.open("output.txt");
+    out.open("output.txt", std::ios::app);
 
     if(out.is_open()){
         out << block.body;
         //std::cout << "Записано в файл: " << block.body << std::endl;
-        std::cout << "Wrote to file: " << block.body << std::endl;
+        // std::cout << "Wrote to file: " << block.body << std::endl;
         out.close();
-        lstEnabled = false;
+        if (block.is_last)
+            lstEnabled = false;
     } else {
         //std::cerr << "Ошибка открытия файла" << std::endl;
         std::cerr << "Error opening file" << std::endl;
@@ -124,7 +122,7 @@ void defragmentator(std::vector<Block> &blocks, bool &IsEnabled){
     int packNumber;
     
     std::ofstream out;
-    out.open("output.txt");
+    out.open("output.txt", std::ios::app);
     //std::cout << "Файл успешно открыт" << std::endl;
     std::cout << "File opened successfully" << std::endl;
     if(out.is_open()){
