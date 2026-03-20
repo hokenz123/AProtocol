@@ -14,7 +14,7 @@ void print_vector (const std::vector<T>& vec) {
 }
 
 const int Port = 8888;
-const char* SendAddr = "127.0.0.1";
+const char* SendAddr = "localhost";
 
 int main() {
     MAIN_STARTUP();

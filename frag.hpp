@@ -19,9 +19,9 @@ namespace AProtocol{
 
     class Block {
     private:
-        unsigned int block_count     : 8;
+        unsigned int block_count     : 16;
         int is_last                  : 1;
-        int padding                  : 23;
+        int padding                  : 15;
 
         char body[BodySize];
     public:

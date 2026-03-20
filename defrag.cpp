@@ -3,7 +3,10 @@
 #include <cstring>
 #include <vector>
 #include "oursockets.h"
-//#include <thread>
+#include <thread>
+#include <mutex>
+#include <chrono>
+#include <iomanip>
 
 static const int PORT = 8888;
 static const int BlockSize = 1500;
@@ -12,27 +15,35 @@ static const int BodySize = BlockSize - HeaderSize;
 
 bool lstEnabled = true;
 bool dfgEnabled = true;
+bool monEnabled = true;
+std::mutex swap_mutex;
+
+long long total_packets = 0;
+long long total_bytes = 0;
 
 #pragma pack(push, 1)
 struct Block {
-    unsigned int block_count : 8;
+    unsigned int block_count : 16;
     int is_last : 1;
-    int padding : 23;
+    int padding : 15;
     char body[BodySize];
 };
 #pragma pack(pop)
 
-std::vector<Block> blocks;
+std::vector<Block> blocksA;
+std::vector<Block> blocksB;
+std::vector<Block> *buffs[2] = { &blocksA, &blocksB }; 
 
-void listener(int sockfd);
-void defragmentator(Block block);
-void defragmentator(std::vector<Block> &blocks, bool &IsEnabled);
+namespace AProtocol {
+    void listener(int sockfd, std::vector<Block> *BBuf[], bool &IsEnabled);
+    void defragmentator(std::vector<Block> *blocks[], bool &IsEnabled);
+    void monitor(bool &IsEnabled);
+}
 
 int main() {
     MAIN_STARTUP();
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
-        // std::cerr << "Ошибка создания сокета" << std::endl;
         std::cerr << "Error creating socket" << std::endl;
         return 1;
     }
@@ -43,103 +54,147 @@ int main() {
     server_addr.sin_port = htons(PORT);
     
     if (bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        // std::cerr << "Ошибка привязки сокета к порту " << PORT << std::endl;
         std::cerr << "Error binding socket to port" << PORT << std::endl;
         close(sockfd);
         return 1;
     }
     
-    // std::cout << "заходим в прослушивание" << std::endl;
     std::cout << "Entering listening" << std::endl;
-    listener(sockfd);
 
-    // std::cout << "выход из программы" << std::endl;
+    std::thread lstr(AProtocol::listener, sockfd, buffs, std::ref(lstEnabled));
+    std::thread defr(AProtocol::defragmentator, buffs, std::ref(dfgEnabled));
+    std::thread mon(AProtocol::monitor, std::ref(monEnabled));
+
+    std::cout << "Нажмите Enter для остановки..." << std::endl;
+    std::cin.get();
+
+    lstEnabled = false;
+    dfgEnabled = false;
+    monEnabled = false;
+
+    defr.join();
+    lstr.join();
+    mon.join();
+
     std::cout << "Exit out of program" << std::endl;
-    // std::thread lstr(listener, {sockfd, lstEnabled});
-    // std::thread defr(defragmentator, {blocks, dfgEnabled});
-    //TODO: Потоки не работают
-    // char a;
-    // std::cin >> a;
-
-    // lstEnabled = false;
-    // dfgEnabled = false;
-
-    // defr.join();
-    // lstr.join();
     
     close(sockfd);
-    MAIN_CLEANUP();
+    MAIN_CLEANEUP();
     return 0;
 }
 
-void listener(int sockfd) {
-    // std::cout << "зашли" << std::endl;
-    std::cout << "Entered" << std::endl;
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    char buffer[BlockSize];
-    
-    while (lstEnabled) {
-        // std::cout << "включен и работает" << std::endl;
-        std::cout << "Enabled and working (" << blocks.size() << ')' << std::endl;
-        int n = recvfrom(sockfd, buffer, BlockSize, 0,
-                        (struct sockaddr*)&client_addr, &client_len);
+namespace AProtocol{
+
+    void listener(int sockfd,std::vector<Block> *BBuf[], bool &IsEnabled) { //315 pps avg 
+
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        char buffer[BlockSize];
+
+        total_packets = 0;
+        total_bytes = 0;
+
+        BBuf[0]->reserve(2000);
         
-        if (n == BlockSize) {
-            //std::cout << "чёто пришло" << std::endl;
-            std::cout << "Something recieved" << std::endl;
-            Block block;
-            memcpy(&block, buffer, BlockSize);
-            blocks.push_back(block);
-            //std::cout << "Пришёл пакет размером " << n << " байт" << std::endl;
-            std::cout << "Got packet of size " << n << " byte" << std::endl;
-            defragmentator(block);
-        }
-    }
-}
+        while (IsEnabled) {
 
-void defragmentator(Block block){
-    // для непосредственной записи в файл
-    
-    std::ofstream out;
-    out.open("output.txt", std::ios::app);
+            BBuf[0]->emplace_back();
+            Block& block = BBuf[0]->back();
 
-    if(out.is_open()){
-        out << block.body;
-        //std::cout << "Записано в файл: " << block.body << std::endl;
-        // std::cout << "Wrote to file: " << block.body << std::endl;
-        out.close();
-        if (block.is_last)
-            lstEnabled = false;
-    } else {
-        //std::cerr << "Ошибка открытия файла" << std::endl;
-        std::cerr << "Error opening file" << std::endl;
-    }
-}
+            int n = recvfrom(sockfd, &block, BlockSize, 0,
+                            (struct sockaddr*)&client_addr, &client_len);
+            
+            if(n > 100){
 
-void defragmentator(std::vector<Block> &blocks, bool &IsEnabled){
-    //для помещения в поток
-    int packNumber;
-    
-    std::ofstream out;
-    out.open("output.txt", std::ios::app);
-    //std::cout << "Файл успешно открыт" << std::endl;
-    std::cout << "File opened successfully" << std::endl;
-    if(out.is_open()){
-        while(IsEnabled){
-            if (blocks.size() > 0){
-                for(int i = 0; i < blocks.size(); i++){
-                    Block curBlock = *blocks.begin();
-                    if (curBlock.block_count > packNumber){
-                        packNumber = curBlock.block_count;
-                        out << curBlock.body;
+                total_packets ++ ;
+                total_bytes += n ;
+
+                //memcpy(&block, buffer, n);
+                //BBuf[0]->push_back(std::move(block));
+                
+                {
+                    if (total_packets % 1000 == 0 || block.is_last){
+                        std::lock_guard<std::mutex> lock(swap_mutex);
+                        std::swap(BBuf[0],BBuf[1]);
                     }
                 }
+
+            } else {
+                BBuf[0]->pop_back();
+                continue;
+            }
+            
+        }
+        
+    }
+
+    void defragmentator(std::vector<Block> *blocks[], bool &IsEnabled){
+        int packNumber = 0;
+        
+        std::ofstream out;
+        out.open("recieved.txt");
+        std::cout << "File opened successfully" << std::endl;
+        if(out.is_open()){
+            while(IsEnabled){
+
+                std::vector<Block> blocksToWrite;
+
+                {
+                    if (!blocks[1]->empty()) {
+                        std::lock_guard<std::mutex> lock(swap_mutex);
+                        blocksToWrite.swap(*blocks[1]);          
+                    }
+                }   
+
+                for (const auto& block : blocksToWrite) {
+                    out.write(block.body, BodySize);
+                    out.flush();
+                    //std::cout << "Wrote block #" << (int)block.block_count << std::endl;
+                }
+
+            }
+            out.close();
+        } else {
+            std::cerr << "Error opening file" << std::endl;
+        }
+    }
+
+    void monitor(bool &IsEnabled){
+
+        using namespace std::chrono;
+
+        time_point last_time = steady_clock::now();
+        long long last_packets = 0;
+        long long last_bytes = 0;
+
+        while (IsEnabled){
+            std::this_thread::sleep_for(milliseconds(100));
+        
+            time_point current_time = steady_clock::now();
+            int64_t ns = duration_cast<nanoseconds>(current_time - last_time).count();
+
+            if (ns >= 1'000'000'000) {
+                long long packets_diff = total_packets - last_packets;
+                long long bytes_diff = total_bytes - last_bytes;
+                
+                double speed_gbps = (bytes_diff * 8.0) / ns;
+
+                //TODO:replace this shit with qt
+                std::cout << "\n=== SPEED STATS ===" << std::endl;
+                std::cout << "Time interval: " << ns << " ns (" << ns / 1'000'000'000.0 << " sec)" << std::endl;
+                std::cout << "Packets: " << packets_diff << " pps" << std::endl;
+                std::cout << "Data: " << bytes_diff << " bytes (" << bytes_diff / (1024.0 * 1024.0) << " MB)" << std::endl;
+                std::cout << "Speed: " << std::fixed << std::setprecision(3) << speed_gbps << " Gbps" << std::endl;
+                std::cout << "Total packets: " << total_packets << std::endl;
+                std::cout << "Total data: " << (total_bytes / (1024.0 * 1024.0 * 1024.0)) << " GB" << std::endl;
+                std::cout << "==================" << std::endl;
+
+                
+                last_packets = total_packets;
+                last_bytes = total_bytes;
+                last_time = current_time;
             }
         }
-        out.close();
-    } else {
-        //std::cerr << "Ошибка открытия файла" << std::endl;
-        std::cerr << "Error opening file" << std::endl;
+
     }
 }
