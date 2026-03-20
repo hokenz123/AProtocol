@@ -5,6 +5,8 @@
 #include "oursockets.h"
 #include <thread>
 #include <mutex>
+#include <chrono>
+#include <iomanip>
 
 static const int PORT = 8888;
 static const int BlockSize = 1500;
@@ -13,7 +15,11 @@ static const int BodySize = BlockSize - HeaderSize;
 
 bool lstEnabled = true;
 bool dfgEnabled = true;
+bool monEnabled = true;
 std::mutex swap_mutex;
+
+long long total_packets = 0;
+long long total_bytes = 0;
 
 #pragma pack(push, 1)
 struct Block {
@@ -26,11 +32,13 @@ struct Block {
 
 std::vector<Block> blocksA;
 std::vector<Block> blocksB;
-std::vector<Block> *buffs[2] = { &blocksA, &blocksB }; ;
+std::vector<Block> *buffs[2] = { &blocksA, &blocksB }; 
 
-void listener(int sockfd,std::vector<Block> *BBuf[], bool &IsEnabled);
-void defragmentator_NT(Block block, std::ofstream &out);
-void defragmentator(std::vector<Block> *blocks[], bool &IsEnabled);
+namespace AProtocol {
+    void listener(int sockfd, std::vector<Block> *BBuf[], bool &IsEnabled);
+    void defragmentator(std::vector<Block> *blocks[], bool &IsEnabled);
+    void monitor(bool &IsEnabled);
+}
 
 int main() {
     MAIN_STARTUP();
@@ -52,19 +60,21 @@ int main() {
     }
     
     std::cout << "Entering listening" << std::endl;
-    //listener(sockfd, lstEnabled);
 
-    std::thread lstr(listener, sockfd, buffs, std::ref(lstEnabled));
-    std::thread defr(defragmentator, buffs, std::ref(dfgEnabled));
+    std::thread lstr(AProtocol::listener, sockfd, buffs, std::ref(lstEnabled));
+    std::thread defr(AProtocol::defragmentator, buffs, std::ref(dfgEnabled));
+    std::thread mon(AProtocol::monitor, std::ref(monEnabled));
 
     std::cout << "Нажмите Enter для остановки..." << std::endl;
     std::cin.get();
 
     lstEnabled = false;
     dfgEnabled = false;
+    monEnabled = false;
 
     defr.join();
     lstr.join();
+    mon.join();
 
     std::cout << "Exit out of program" << std::endl;
     
@@ -73,86 +83,118 @@ int main() {
     return 0;
 }
 
-void listener(int sockfd,std::vector<Block> *BBuf[], bool &IsEnabled) {
+namespace AProtocol{
 
-    std::cout << "Entered" << std::endl;
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    char buffer[BlockSize];
+    void listener(int sockfd,std::vector<Block> *BBuf[], bool &IsEnabled) { //315 pps avg 
 
-    int packet_count = 0;
-    
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        char buffer[BlockSize];
 
-    while (IsEnabled) {
+        total_packets = 0;
+        total_bytes = 0;
 
-        //std::cout << "Enabled and working" << std::endl;
-        int n = recvfrom(sockfd, buffer, BlockSize, 0,
-                        (struct sockaddr*)&client_addr, &client_len);
+        BBuf[0]->reserve(2000);
         
-        packet_count++;
-        
+        while (IsEnabled) {
 
-        if (n == BlockSize || n == 15 || true) {
-            //std::cout << "Something recieved" << std::endl;
-            Block block;
-            memcpy(&block, buffer, BlockSize);
-            
-            std::cout << "Packet #" << packet_count << " got ____ count #" << block.block_count << std::endl;
+            BBuf[0]->emplace_back();
+            Block& block = BBuf[0]->back();
 
-            BBuf[0]->push_back(block);
+            int n = recvfrom(sockfd, &block, BlockSize, 0,
+                            (struct sockaddr*)&client_addr, &client_len);
             
-            //std::cout << "Got packet of size " << n << " byte" << std::endl ;
-            {
-                if (packet_count % 1000 == 0 || block.is_last){
-                    std::lock_guard<std::mutex> lock(swap_mutex);
-                    std::swap(BBuf[0],BBuf[1]);
+            if(n > 100){
+
+                total_packets ++ ;
+                total_bytes += n ;
+
+                //memcpy(&block, buffer, n);
+                //BBuf[0]->push_back(std::move(block));
+                
+                {
+                    if (total_packets % 1000 == 0 || block.is_last){
+                        std::lock_guard<std::mutex> lock(swap_mutex);
+                        std::swap(BBuf[0],BBuf[1]);
+                    }
                 }
+
+            } else {
+                BBuf[0]->pop_back();
+                continue;
             }
+            
         }
         
     }
-    
-}
 
-void defragmentator_NT(Block block, std::ofstream &out){
-    // для непосредственной записи в файл
+    void defragmentator(std::vector<Block> *blocks[], bool &IsEnabled){
+        int packNumber = 0;
+        
+        std::ofstream out;
+        out.open("recieved.txt");
+        std::cout << "File opened successfully" << std::endl;
+        if(out.is_open()){
+            while(IsEnabled){
 
-    if(out.is_open()){
-        out << block.body;
-        std::cout << "Wrote to file: " << block.body << std::endl;
-    } else {
-        std::cerr << "Error opening file" << std::endl;
-    }
-}
+                std::vector<Block> blocksToWrite;
 
-void defragmentator(std::vector<Block> *blocks[], bool &IsEnabled){
-    //для помещения в поток
-    int packNumber = 0;
-    
-    std::ofstream out;
-    out.open("recieved.txt");
-    std::cout << "File opened successfully" << std::endl;
-    if(out.is_open()){
-        while(IsEnabled){
+                {
+                    if (!blocks[1]->empty()) {
+                        std::lock_guard<std::mutex> lock(swap_mutex);
+                        blocksToWrite.swap(*blocks[1]);          
+                    }
+                }   
 
-            std::vector<Block> blocksToWrite;
-
-            {
-                if (!blocks[1]->empty()) {
-                    std::lock_guard<std::mutex> lock(swap_mutex);
-                    blocksToWrite.swap(*blocks[1]);          
+                for (const auto& block : blocksToWrite) {
+                    out.write(block.body, BodySize);
+                    out.flush();
+                    //std::cout << "Wrote block #" << (int)block.block_count << std::endl;
                 }
-            }   
 
-            for (const auto& block : blocksToWrite) {
-                out.write(block.body, BodySize);
-                out.flush();
-                std::cout << "Wrote block #" << (int)block.block_count << std::endl;
             }
-
+            out.close();
+        } else {
+            std::cerr << "Error opening file" << std::endl;
         }
-        out.close();
-    } else {
-        std::cerr << "Error opening file" << std::endl;
+    }
+
+    void monitor(bool &IsEnabled){
+
+        using namespace std::chrono;
+
+        time_point last_time = steady_clock::now();
+        long long last_packets = 0;
+        long long last_bytes = 0;
+
+        while (IsEnabled){
+            std::this_thread::sleep_for(milliseconds(100));
+        
+            time_point current_time = steady_clock::now();
+            int64_t ns = duration_cast<nanoseconds>(current_time - last_time).count();
+
+            if (ns >= 1'000'000'000) {
+                long long packets_diff = total_packets - last_packets;
+                long long bytes_diff = total_bytes - last_bytes;
+                
+                double speed_gbps = (bytes_diff * 8.0) / ns;
+
+                //TODO:replace this shit with qt
+                std::cout << "\n=== SPEED STATS ===" << std::endl;
+                std::cout << "Time interval: " << ns << " ns (" << ns / 1'000'000'000.0 << " sec)" << std::endl;
+                std::cout << "Packets: " << packets_diff << " pps" << std::endl;
+                std::cout << "Data: " << bytes_diff << " bytes (" << bytes_diff / (1024.0 * 1024.0) << " MB)" << std::endl;
+                std::cout << "Speed: " << std::fixed << std::setprecision(3) << speed_gbps << " Gbps" << std::endl;
+                std::cout << "Total packets: " << total_packets << std::endl;
+                std::cout << "Total data: " << (total_bytes / (1024.0 * 1024.0 * 1024.0)) << " GB" << std::endl;
+                std::cout << "==================" << std::endl;
+
+                
+                last_packets = total_packets;
+                last_bytes = total_bytes;
+                last_time = current_time;
+            }
+        }
+
     }
 }
